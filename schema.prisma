@@ -1,0 +1,233 @@
+// AriyaeiNetwork — Prisma Schema
+// Project: AriyaeiNetwork
+// Creator: Armin Hamizadeh (آرمین حامی‌زاده)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------------------------------------------
+// ENUMS
+// ------------------------------------------------------------------
+
+enum ExpirationMode {
+  FIRST_CONNECT   // Timer starts on user's first observed byte of traffic
+  FIXED_DATE      // Hard calendar expiration
+  VOLUME_ONLY     // Expires strictly when data cap is reached
+  TEMPORARY_TEST  // Auto-expiring 24h trial
+}
+
+enum UserStatus {
+  ACTIVE
+  EXPIRED
+  DISABLED
+  PENDING_FIRST_CONNECT
+}
+
+enum Protocol {
+  VLESS
+  VMESS
+  TROJAN
+  SHADOWSOCKS
+  HYSTERIA2
+  GOST
+  RATHOLE
+  BACKHAUL
+  SIXTOFOUR // 6to4 relay
+}
+
+enum NodeRole {
+  RELAY
+  EXIT
+  ENTRY
+  AI_ROUTE // Dedicated clean-IP node for AI service access
+}
+
+enum NodeStatus {
+  ONLINE
+  OFFLINE
+  DEPLOYING
+  ERROR
+  DECOMMISSIONED
+}
+
+enum DeploymentJobType {
+  INSTALL_XRAY
+  INSTALL_SINGBOX
+  INSTALL_GOST
+  INSTALL_RATHOLE
+  INSTALL_BACKHAUL
+  INSTALL_HYSTERIA2
+  SETUP_6TO4
+  APPLY_BBR
+  APPLY_CLOUDFLARE_WARP
+  ROTATE_CERTS
+  TEARDOWN
+}
+
+enum DeploymentJobStatus {
+  QUEUED
+  RUNNING
+  SUCCESS
+  FAILED
+  ROLLED_BACK
+}
+
+enum AiProvider {
+  OPENAI
+  GEMINI
+  CLAUDE
+}
+
+enum IpCleanliness {
+  UNKNOWN
+  CLEAN
+  FLAGGED
+  BLOCKED
+}
+
+enum Language {
+  FA
+  EN
+  ZH
+}
+
+// ------------------------------------------------------------------
+// CORE MODELS
+// ------------------------------------------------------------------
+
+model Admin {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  telegramId   BigInt?  @unique
+  isSuperAdmin Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  broadcasts   Broadcast[]
+}
+
+model User {
+  id                String          @id @default(cuid())
+  username          String          @unique
+  telegramId        BigInt?         @unique
+  preferredLanguage Language        @default(EN)
+
+  // Expiration lifecycle
+  expirationMode    ExpirationMode  @default(FIXED_DATE)
+  status            UserStatus      @default(PENDING_FIRST_CONNECT)
+
+  firstConnectAt    DateTime?       // set the moment first byte is seen
+  validityDuration  Int?            // seconds, used with FIRST_CONNECT / TEMPORARY_TEST
+  expiresAt         DateTime?       // resolved absolute expiry (nullable until first connect for that mode)
+
+  dataQuotaBytes    BigInt?         // used with VOLUME_ONLY (and as secondary cap on others)
+  dataUsedBytes     BigInt          @default(0)
+
+  aiRoutingEnabled  Boolean         @default(false)
+  assignedAiIpId    String?
+  assignedAiIp      CleanIp?        @relation(fields: [assignedAiIpId], references: [id])
+
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  trafficLogs       TrafficLog[]
+  subscriptions     Subscription[]
+
+  @@index([status])
+  @@index([expirationMode])
+}
+
+model Subscription {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nodeId     String
+  node       Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  protocol   Protocol
+  uuidOrKey  String   // per-protocol credential (vless uuid, ss password, etc.)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, nodeId, protocol])
+}
+
+model TrafficLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nodeId    String?
+  bytesUp   BigInt
+  bytesDown BigInt
+  recordedAt DateTime @default(now())
+
+  @@index([userId, recordedAt])
+}
+
+model Node {
+  id           String     @id @default(cuid())
+  name         String
+  host         String
+  sshPort      Int        @default(22)
+  sshUser      String
+  sshKeyRef    String     // reference/path to secret in vault, never raw key in DB
+  role         NodeRole
+  status       NodeStatus @default(OFFLINE)
+  protocols    Protocol[]
+  country      String?
+  bbrEnabled   Boolean    @default(false)
+  warpEnabled  Boolean    @default(false)
+  cpuCores     Int?
+  ramMb        Int?
+  lastSeenAt   DateTime?
+  createdAt    DateTime   @default(now())
+
+  subscriptions  Subscription[]
+  deploymentJobs DeploymentJob[]
+  cleanIps       CleanIp[]
+
+  @@index([role, status])
+}
+
+model DeploymentJob {
+  id          String              @id @default(cuid())
+  nodeId      String
+  node        Node                @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  type        DeploymentJobType
+  status      DeploymentJobStatus @default(QUEUED)
+  logOutput   String?             @db.Text
+  errorOutput String?             @db.Text
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime            @default(now())
+
+  @@index([nodeId, status])
+}
+
+model CleanIp {
+  id            String        @id @default(cuid())
+  nodeId        String
+  node          Node          @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  ipAddress     String        @unique
+  provider      AiProvider
+  cleanliness   IpCleanliness @default(UNKNOWN)
+  lastCheckedAt DateTime?
+  isStatic      Boolean       @default(false)
+  assignedUsers User[]
+
+  @@index([provider, cleanliness])
+}
+
+model Broadcast {
+  id          String   @id @default(cuid())
+  adminId     String
+  admin       Admin    @relation(fields: [adminId], references: [id])
+  messageFa   String?  @db.Text
+  messageEn   String?  @db.Text
+  messageZh   String?  @db.Text
+  sentAt      DateTime @default(now())
+  recipients  Int      @default(0)
+}
